@@ -2,12 +2,175 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/gaming-analytics/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="preconnect" href="https://script.google.com" crossorigin />
+    <link rel="dns-prefetch" href="//script.google.com" />
+    <link rel="preload" as="fetch" crossorigin href="https://script.google.com/macros/s/AKfycbzy6ZGncseFmVgybDnzZWBRZ3kCqrj1E5_WPoCTdb1njcSA4ICCgIcR2l_qMSsfjL4foQ/exec?action=listSheets" />
+    <link rel="preload" as="fetch" crossorigin href="https://script.google.com/macros/s/AKfycbzy6ZGncseFmVgybDnzZWBRZ3kCqrj1E5_WPoCTdb1njcSA4ICCgIcR2l_qMSsfjL4foQ/exec?action=listFolders" />
+    <link rel="modulepreload" crossorigin href="/gaming-analytics/assets/index-DQ8_eJ11.js" />
+    <link rel="stylesheet" crossorigin href="/gaming-analytics/assets/index-Cx4CsI3-.css" />
+    <link rel="icon" type="image/svg+xml" href="/gaming-analytics/favicon.svg" />
     <title>JILI 品牌曝光大盤總覽 | Gaming Analytics</title>
     <meta name="description" content="即時監控運營商站台的 JILI 品牌曝光表現、競爭力分析與黃金版位評級" />
+    <script>
+    (function () {
+      if (typeof window === "undefined" || !window.fetch) return;
+
+      var APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzy6ZGncseFmVgybDnzZWBRZ3kCqrj1E5_WPoCTdb1njcSA4ICCgIcR2l_qMSsfjL4foQ/exec";
+      var APPS_SCRIPT_DOMAIN = "script.google.com";
+
+      // Memory-only TTL — short windows just to dedupe React double-effect and rapid clicks.
+      // Real "fresh on user action" still happens because clicks are typically > TTL apart.
+      var TTL_BY_ACTION = {
+        listSheets:    60 * 1000,
+        listFolders:   60 * 1000,
+        listFiles:     60 * 1000,
+        getSheetData:  10 * 1000,
+        getImageBase64: 0,
+        updateCell:     0
+      };
+
+      var memCache = {};   // url -> { body, t }
+      var inflight = {};   // url -> Promise
+
+      function getAction(url) {
+        try { return new URL(url).searchParams.get("action") || ""; }
+        catch (e) { return ""; }
+      }
+
+      function ttlFor(action) {
+        return TTL_BY_ACTION.hasOwnProperty(action) ? TTL_BY_ACTION[action] : 0;
+      }
+
+      function isAppsScript(url) {
+        return !!url && url.indexOf(APPS_SCRIPT_DOMAIN) !== -1;
+      }
+
+      function makeResponse(body) {
+        return new Response(body, {
+          status: 200,
+          statusText: "OK",
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      var origFetch = window.fetch.bind(window);
+
+      function storeIfOk(url, text) {
+        try {
+          var parsed = JSON.parse(text);
+          if (parsed && !parsed.error) {
+            memCache[url] = { body: text, t: Date.now() };
+            cascadePrewarm(url, parsed);
+          }
+        } catch (e) {}
+      }
+
+      function buildUrl(action, extra) {
+        var u = new URL(APPS_SCRIPT_URL);
+        u.searchParams.set("action", action);
+        if (extra) {
+          Object.keys(extra).forEach(function (k) { u.searchParams.set(k, extra[k]); });
+        }
+        return u.toString();
+      }
+
+      function fireBackground(url) {
+        if (memCache[url] || inflight[url]) return;
+        setTimeout(function () { window.fetch(url).catch(function () {}); }, 0);
+      }
+
+      function cascadePrewarm(url, parsed) {
+        try {
+          var action = getAction(url);
+
+          // listSheets returned → prewarm getSheetData(firstSheet) and maybe listFiles
+          if (action === "listSheets" && parsed.sheets && parsed.sheets[0]) {
+            var firstName = parsed.sheets[0].name;
+            if (firstName) fireBackground(buildUrl("getSheetData", { sheetName: firstName }));
+            tryPrewarmListFiles();
+          }
+
+          // listFolders returned → if listSheets cache exists, fire listFiles for matching folder
+          if (action === "listFolders") tryPrewarmListFiles();
+        } catch (e) {}
+      }
+
+      function tryPrewarmListFiles() {
+        try {
+          var sheetsBody = null, foldersBody = null;
+          Object.keys(memCache).forEach(function (k) {
+            var a = getAction(k);
+            if (a === "listSheets") sheetsBody = memCache[k].body;
+            else if (a === "listFolders") foldersBody = memCache[k].body;
+          });
+          if (!sheetsBody || !foldersBody) return;
+
+          var sheets = JSON.parse(sheetsBody).sheets || [];
+          var folders = JSON.parse(foldersBody).folders || [];
+          if (!sheets[0]) return;
+
+          var firstName = sheets[0].name;
+          var wanted = "data-" + firstName;
+          var match = null;
+          for (var i = 0; i < folders.length; i++) {
+            if (folders[i].name === wanted || folders[i].name === firstName) { match = folders[i]; break; }
+          }
+          if (match && match.id) fireBackground(buildUrl("listFiles", { folderId: match.id }));
+        } catch (e) {}
+      }
+
+      window.fetch = function (input, init) {
+        var url = typeof input === "string" ? input : (input && input.url) || "";
+        var method = ((init && init.method) || (input && input.method) || "GET").toUpperCase();
+
+        if (method !== "GET" || !isAppsScript(url)) return origFetch(input, init);
+
+        var action = getAction(url);
+        var ttl = ttlFor(action);
+        var now = Date.now();
+        var entry = memCache[url];
+
+        // Fresh enough → serve from memory (only happens within a few seconds; just dedupes
+        // double-fired effects and rapid re-clicks of the same sheet)
+        if (ttl > 0 && entry && now - entry.t < ttl) {
+          return Promise.resolve(makeResponse(entry.body));
+        }
+
+        // Same URL already in-flight → wait for it instead of duplicating the network call
+        if (inflight[url]) {
+          return inflight[url].then(function () {
+            var e2 = memCache[url];
+            if (e2) return makeResponse(e2.body);
+            return origFetch(input, init);
+          });
+        }
+
+        var p = origFetch(input, init).then(function (resp) {
+          if (resp.ok && ttl > 0) {
+            return resp.clone().text().then(function (text) {
+              storeIfOk(url, text);
+              return resp;
+            });
+          }
+          return resp;
+        });
+
+        inflight[url] = p;
+        p.then(function () { delete inflight[url]; }, function () { delete inflight[url]; });
+        return p;
+      };
+
+      // Early prewarm: kick off the slowest two requests immediately while the JS bundle
+      // is still being downloaded. By the time React mounts and asks for them, they are
+      // either already cached or in-flight (no duplicate request — fetch wrapper dedupes).
+      try {
+        window.fetch(buildUrl("listSheets")).catch(function () {});
+        window.fetch(buildUrl("listFolders")).catch(function () {});
+      } catch (e) {}
+    })();
+    </script>
     <script type="module" crossorigin src="/gaming-analytics/assets/index-DQ8_eJ11.js"></script>
-    <link rel="stylesheet" crossorigin href="/gaming-analytics/assets/index-Cx4CsI3-.css">
   </head>
   <body>
     <div id="root"></div>
